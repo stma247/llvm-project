@@ -25,6 +25,13 @@ struct CoverageViewOptions {
 
   enum class BranchOutputType { Count, Percent, Off };
 
+  enum class BranchCoverageCollisionMode {
+    Unify,
+    SumUp,
+    Unique,
+    ExpressInstance
+  };
+
   bool Debug;
   bool Colors;
   bool ShowLineNumbers;
@@ -56,6 +63,7 @@ struct CoverageViewOptions {
   std::string CompilationDirectory;
   float HighCovWatermark;
   float LowCovWatermark;
+  BranchCoverageCollisionMode ExportBranchCoverageCollisionMode;
 
   /// Change the output's stream color if the colors are enabled.
   ColoredRawOstream colored_ostream(raw_ostream &OS,
