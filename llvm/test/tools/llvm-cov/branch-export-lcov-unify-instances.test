@@ -1,0 +1,80 @@
+
+// RUN: llvm-profdata merge %S/Inputs/branch-templates.proftext -o %t.profdata
+// RUN: llvm-cov export --format=lcov --function-collision-mode=unify %S/Inputs/branch-templates.o32l -instr-profile %t.profdata | FileCheck %s -check-prefix=UNIFY
+
+// UNIFY-DAG: BRDA:14,0,0,0
+// UNIFY-DAG: BRDA:14,0,1,1
+// UNIFY-DAG: BRDA:14,0,0,1
+// UNIFY-DAG: BRDA:14,0,1,0
+// UNIFY-DAG: BRDA:14,0,0,0
+// UNIFY-DAG: BRDA:14,0,1,1
+// UNIFY-DAG: BRDA:30,0,0,1
+// UNIFY-DAG: BRDA:30,0,1,0
+// UNIFY-DAG: BRDA:32,0,0,0
+// UNIFY-DAG: BRDA:32,0,1,1
+// UNIFY-DAG: BRDA:34,0,0,1
+// UNIFY-DAG: BRDA:34,0,1,0
+// UNIFY-NOT: BRDA
+// UNIFY: BRF:8
+// UNIFY: BRH:4
+// UNIFY: LF:17
+// UNIFY: LH:13
+
+// RUN: llvm-profdata merge %S/Inputs/branch-templates.proftext -o %t.profdata
+// RUN: llvm-cov export --format=lcov --function-collision-mode=unique %S/Inputs/branch-templates.o32l -instr-profile %t.profdata | FileCheck %s -check-prefix=UNIQUE
+
+// UNIQUE-DAG: BRDA:14,0,0,0
+// UNIQUE-DAG: BRDA:14,0,1,1
+// UNIQUE-DAG: BRDA:14,1000,0,1
+// UNIQUE-DAG: BRDA:14,1000,1,0
+// UNIQUE-DAG: BRDA:14,2000,0,0
+// UNIQUE-DAG: BRDA:14,2000,1,1
+// UNIQUE-DAG: BRDA:30,0,0,1
+// UNIQUE-DAG: BRDA:30,0,1,0
+// UNIQUE-DAG: BRDA:32,0,0,0
+// UNIQUE-DAG: BRDA:32,0,1,1
+// UNIQUE-DAG: BRDA:34,0,0,1
+// UNIQUE-DAG: BRDA:34,0,1,0
+// UNIQUE-NOT: BRDA
+// UNIQUE: BRF:8
+// UNIQUE: BRH:4
+// UNIQUE: LF:17
+// UNIQUE: LH:13
+
+// RUN: llvm-profdata merge %S/Inputs/branch-templates.proftext -o %t.profdata
+// RUN: llvm-cov export --format=lcov --function-collision-mode=sum-up %S/Inputs/branch-templates.o32l -instr-profile %t.profdata | FileCheck %s -check-prefix=SUM_UP
+
+// SUM_UP-DAG: BRDA:14,0,0,1
+// SUM_UP-DAG: BRDA:14,0,1,2
+// SUM_UP-DAG: BRDA:30,0,0,1
+// SUM_UP-DAG: BRDA:30,0,1,0
+// SUM_UP-DAG: BRDA:32,0,0,0
+// SUM_UP-DAG: BRDA:32,0,1,1
+// SUM_UP-DAG: BRDA:34,0,0,1
+// SUM_UP-DAG: BRDA:34,0,1,0
+// SUM_UP-NOT: BRDA
+// SUM_UP: BRF:8
+// SUM_UP: BRH:4
+// SUM_UP: LF:17
+// SUM_UP: LH:13
+
+// RUN: llvm-profdata merge %S/Inputs/branch-templates.proftext -o %t.profdata
+// RUN: llvm-cov export --format=lcov --function-collision-mode=express-instance %S/Inputs/branch-templates.o32l -instr-profile %t.profdata | FileCheck %s -check-prefix=EXPRESS
+
+// EXPRESS-DAG: BRDA:14,0,I0[0],0
+// EXPRESS-DAG: BRDA:14,0,I0[1],1
+// EXPRESS-DAG: BRDA:14,0,I1[0],1
+// EXPRESS-DAG: BRDA:14,0,I1[1],0
+// EXPRESS-DAG: BRDA:14,0,I2[0],0
+// EXPRESS-DAG: BRDA:14,0,I2[1],1
+// EXPRESS-DAG: BRDA:30,0,0,1
+// EXPRESS-DAG: BRDA:30,0,1,0
+// EXPRESS-DAG: BRDA:32,0,0,0
+// EXPRESS-DAG: BRDA:32,0,1,1
+// EXPRESS-DAG: BRDA:34,0,0,1
+// EXPRESS-DAG: BRDA:34,0,1,0
+// EXPRESS-NOT: BRDA
+// EXPRESS: BRF:8
+// EXPRESS: BRH:4
+// EXPRESS: LF:17
+// EXPRESS: LH:13

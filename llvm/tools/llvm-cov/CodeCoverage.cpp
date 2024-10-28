@@ -1270,6 +1270,30 @@ int CodeCoverageTool::doExport(int argc, const char **argv,
                               cl::desc("Don't export branch data (LCOV)"),
                               cl::cat(ExportCategory));
 
+  cl::opt<CoverageViewOptions::BranchCoverageCollisionMode>
+      ExportBranchCoverageCollisionMode(
+          "function-collision-mode",
+          cl::desc("Handling of function instantiations in branch coverage "
+                   "(lcov only)"),
+          cl::values(
+              clEnumValN(
+                  CoverageViewOptions::BranchCoverageCollisionMode::Unify,
+                  "unify", "Unify same branches using"),
+              clEnumValN(
+                  CoverageViewOptions::BranchCoverageCollisionMode::SumUp,
+                  "sum-up",
+                  "Combine same branches into one and sum-up the execution "
+                  "counters"),
+              clEnumValN(
+                  CoverageViewOptions::BranchCoverageCollisionMode::Unique,
+                  "unique", "Use unique block numbers for colliding instances"),
+              clEnumValN(
+                  CoverageViewOptions::BranchCoverageCollisionMode::
+                      ExpressInstance,
+                  "express-instance",
+                  "Add instance id to branch number (requires genhtml 2.0)")),
+          cl::init(CoverageViewOptions::BranchCoverageCollisionMode::SumUp));
+
   auto Err = commandLineParser(argc, argv);
   if (Err)
     return Err;
@@ -1277,6 +1301,8 @@ int CodeCoverageTool::doExport(int argc, const char **argv,
   ViewOpts.SkipExpansions = SkipExpansions;
   ViewOpts.SkipFunctions = SkipFunctions;
   ViewOpts.SkipBranches = SkipBranches;
+  ViewOpts.ExportBranchCoverageCollisionMode =
+      ExportBranchCoverageCollisionMode;
 
   if (ViewOpts.Format != CoverageViewOptions::OutputFormat::Text &&
       ViewOpts.Format != CoverageViewOptions::OutputFormat::Lcov) {

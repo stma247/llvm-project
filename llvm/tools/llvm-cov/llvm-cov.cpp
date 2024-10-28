@@ -17,7 +17,10 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/raw_ostream.h"
+#include <iostream>
 #include <string>
+
+#define DEBUG_TYPE "llvm-cov"
 
 using namespace llvm;
 
@@ -57,6 +60,15 @@ static int versionMain(int argc, const char *argv[]) {
 
 int main(int argc, const char **argv) {
   InitLLVM X(argc, argv);
+
+#if 1
+  DebugFlag = true;
+  const char *DebugTypes[] = {DEBUG_TYPE, "coverage-mapping"};
+  const char *DebugTypes2[] = {"coverage-mapping2"};
+
+  // setCurrentDebugTypes(DebugTypes, 2);
+  setCurrentDebugTypes(DebugTypes2, 1);
+#endif
 
   // If argv[0] is or ends with 'gcov', always be gcov compatible
   if (sys::path::stem(argv[0]).ends_with_insensitive("gcov"))
