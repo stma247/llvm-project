@@ -41,6 +41,7 @@
 
 #include "CoverageExporterLcov.h"
 #include "CoverageReport.h"
+#include <iostream>
 
 using namespace llvm;
 using namespace coverage;
@@ -53,15 +54,74 @@ struct NestedCountedRegion : public coverage::CountedRegion {
   std::vector<LineColPair> NestedPath;
   // Indicates whether this item should be ignored at rendering.
   bool Ignore = false;
+  //
+  unsigned Position;
 
   NestedCountedRegion(llvm::coverage::CountedRegion Region,
-                      std::vector<LineColPair> NestedPath)
+                      std::vector<LineColPair> NestedPath, unsigned Position)
       : llvm::coverage::CountedRegion(std::move(Region)),
-        NestedPath(std::move(NestedPath)) {}
+        NestedPath(std::move(NestedPath)), Position(Position) {}
 
   // Returns the root line of the branch.
   unsigned getEffectiveLine() const { return NestedPath.front().first; }
 };
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
+                              const coverage::Counter &v) {
+  return os << "Counter[Kind=" << v.getKind() << ",Id=" << v.getCounterID()
+            << "]";
+}
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
+                              const coverage::mcdc::Parameters &v) {
+  return os << "TODO";
+}
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os, const LineColPair &v) {
+  return os << "LineColPair[Line=" << v.first << ",Column=" << v.second << "]";
+}
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
+                              const std::vector<LineColPair> &v) {
+  os << "[";
+  bool first = true;
+  for (auto &e : v) {
+    if (!first)
+      os << ", ";
+    os << e;
+    first = false;
+  }
+  return os << "]";
+}
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
+                              const coverage::CounterMappingRegion &v) {
+  return os << "CounterMappingRegion[Count=" << v.Count
+            << ", FalseCount=" << v.FalseCount
+            << ", MCDCParams=" << v.MCDCParams << ", FileID=" << v.FileID
+            << ", ExpandedFileID=" << v.ExpandedFileID
+            << ", LineStart=" << v.LineStart
+            << ", ColumnStart=" << v.ColumnStart << ", LineEnd=" << v.LineEnd
+            << ", LineEnd=" << v.ColumnEnd << ", Kind=" << v.Kind << "]";
+}
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
+                              const coverage::CountedRegion &v) {
+  const coverage::CounterMappingRegion &Base = v;
+  return os << "CountedRegion[" << Base
+            << ", ExecutionCount=" << v.ExecutionCount
+            << ", FalseExecutionCount=" << v.FalseExecutionCount
+            << ", TrueFolded=" << v.TrueFolded
+            << ", FalseFolded=" << v.FalseFolded
+            << ", HasSingleByteCoverage=" << v.HasSingleByteCoverage << "]";
+}
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &os,
+                              const NestedCountedRegion &v) {
+  const coverage::CountedRegion &Base = v;
+  return os << "NestedCountedRegion[" << Base << ", NestedPath=" << v.NestedPath
+            << ", Ignore=" << v.Ignore << "]";
+}
 
 void renderFunctionSummary(raw_ostream &OS,
                            const FileCoverageSummary &Summary) {
@@ -95,7 +155,8 @@ void renderLineExecutionCounts(raw_ostream &OS,
 std::vector<NestedCountedRegion>
 collectNestedBranches(const coverage::CoverageMapping &Coverage,
                       ArrayRef<llvm::coverage::ExpansionRecord> Expansions,
-                      std::vector<LineColPair> &NestedPath) {
+                      std::vector<LineColPair> &NestedPath,
+                      unsigned &Position) {
   std::vector<NestedCountedRegion> Branches;
   for (const auto &Expansion : Expansions) {
     auto ExpansionCoverage = Coverage.getCoverageForExpansion(Expansion);
@@ -106,14 +167,14 @@ collectNestedBranches(const coverage::CoverageMapping &Coverage,
     // Recursively collect branches from nested expansions.
     auto NestedExpansions = ExpansionCoverage.getExpansions();
     auto NestedExBranches =
-        collectNestedBranches(Coverage, NestedExpansions, NestedPath);
+        collectNestedBranches(Coverage, NestedExpansions, NestedPath, Position);
     append_range(Branches, NestedExBranches);
 
     // Add branches from this level of expansion.
     auto ExBranches = ExpansionCoverage.getBranches();
     for (auto &B : ExBranches)
       if (B.FileID == Expansion.FileID) {
-        Branches.push_back(NestedCountedRegion(B, NestedPath));
+        Branches.push_back(NestedCountedRegion(B, NestedPath, Position++));
       }
 
     NestedPath.pop_back();
@@ -128,9 +189,11 @@ void appendNestedCountedRegions(const std::vector<CountedRegion> &Src,
     return !Region.TrueFolded || !Region.FalseFolded;
   });
   Dst.reserve(Dst.size() + Src.size());
+  unsigned PositionCounter = Dst.size();
   std::transform(Unfolded.begin(), Unfolded.end(), std::back_inserter(Dst),
-                 [=](auto &Region) {
-                   return NestedCountedRegion(Region, {Region.startLoc()});
+                 [=, &PositionCounter](auto &Region) {
+                   return NestedCountedRegion(Region, {Region.startLoc()},
+                                              PositionCounter++);
                  });
 }
 
@@ -143,10 +206,25 @@ void appendNestedCountedRegions(const std::vector<NestedCountedRegion> &Src,
   std::copy(Unfolded.begin(), Unfolded.end(), std::back_inserter(Dst));
 }
 
+bool sortLine(const llvm::coverage::CountedRegion &I,
+              const llvm::coverage::CountedRegion &J) {
+  return (I.LineStart < J.LineStart) ||
+         ((I.LineStart == J.LineStart) && (I.ColumnStart < J.ColumnStart));
+}
+
 bool sortNested(const NestedCountedRegion &I, const NestedCountedRegion &J) {
   // This sorts each element by line and column.
   // Implies that all elements are first sorted by getEffectiveLine().
-  return I.NestedPath < J.NestedPath;
+#if 0
+  return sortLine(I, J);
+#elif 1
+  return std::tie(I.NestedPath, I.Position) <
+         std::tie(J.NestedPath, J.Position);
+#else
+  auto CountI = std::make_pair(I.ExecutionCount, I.FalseExecutionCount);
+  auto CountJ = std::make_pair(J.ExecutionCount, J.FalseExecutionCount);
+  return std::tie(I.NestedPath, CountJ) < std::tie(J.NestedPath, CountI);
+#endif
 }
 
 void combineInstanceCounts(std::vector<NestedCountedRegion> &Branches) {
@@ -177,18 +255,41 @@ void renderBranchExecutionCounts(raw_ostream &OS,
   std::vector<NestedCountedRegion> Branches;
 
   appendNestedCountedRegions(FileCoverage.getBranches(), Branches);
+#if 0
+	errs() << "renderBranchExecutionCounts Branches: size=" << Branches.size() << '\n';
+#endif
 
   // Recursively collect branches for all file expansions.
   std::vector<LineColPair> NestedPath;
-  std::vector<NestedCountedRegion> ExBranches =
-      collectNestedBranches(Coverage, FileCoverage.getExpansions(), NestedPath);
+  unsigned PositionCounter = 0;
+  std::vector<NestedCountedRegion> ExBranches = collectNestedBranches(
+      Coverage, FileCoverage.getExpansions(), NestedPath, PositionCounter);
+#if 0
+  errs() << "renderBranchExecutionCounts ExBranches: size=" << ExBranches.size() << '\n';
+#endif
 
   // Append Expansion Branches to Source Branches.
   appendNestedCountedRegions(ExBranches, Branches);
+#if 0
+  int index = 0;
+  for(auto& B : Branches) {
+	errs() << "  Branch[" << index << "]: " << B << '\n'; 
+	index++;
+  }
+#endif
 
   // Sort branches based on line number to ensure branches corresponding to the
   // same source line are counted together.
   llvm::sort(Branches, sortNested);
+
+#if 0
+  errs() << "renderBranchExecutionCounts AfterSort\n"; 
+  index = 0;
+  for(auto& B : Branches) {
+	errs() << "  Branch[" << index << "]: " << B << '\n'; 
+	index++;
+  }
+#endif
 
   if (UnifyInstances) {
     combineInstanceCounts(Branches);
