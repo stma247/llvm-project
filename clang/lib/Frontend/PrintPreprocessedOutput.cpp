@@ -988,6 +988,18 @@ static void PrintPreprocessedTokens(Preprocessor &PP, Token &Tok,
     } else if (Tok.isLiteral() && !Tok.needsCleaning() &&
                Tok.getLiteralData()) {
       Callbacks->OS->write(Tok.getLiteralData(), Tok.getLength());
+
+#if 1
+      // Handle multi-line string literals (e.g., raw strings)
+      // String literals can span multiple lines and need line tracking
+      if (Tok.getKind() == tok::string_literal ||
+          Tok.getKind() == tok::utf8_string_literal ||
+          Tok.getKind() == tok::utf16_string_literal ||
+          Tok.getKind() == tok::utf32_string_literal ||
+          Tok.getKind() == tok::wide_string_literal) {
+          Callbacks->HandleNewlinesInToken(Tok.getLiteralData(), Tok.getLength());
+      }
+#endif
     } else if (Tok.getLength() < std::size(Buffer)) {
       const char *TokPtr = Buffer;
       unsigned Len = PP.getSpelling(Tok, TokPtr);
