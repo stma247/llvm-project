@@ -31,6 +31,10 @@
 // is textually included.
 #define COVMAP_V3
 
+#ifndef TRY_PRESUMED_LOCATION
+#define TRY_PRESUMED_LOCATION 1
+#endif
+
 namespace llvm {
 cl::opt<bool>
     EnableSingleByteCoverage("enable-single-byte-coverage",
@@ -55,6 +59,22 @@ cl::opt<bool> SystemHeadersCoverage(
 using namespace clang;
 using namespace CodeGen;
 using namespace llvm::coverage;
+
+raw_ostream &operator<<(raw_ostream& os, const CounterMappingRegion& value) {
+	return os << "CounterMappingRegion[FileID=" << value.FileID
+		<< ", ExpandedFileID=" << value.ExpandedFileID
+		<< ", LineStart=" << value.LineStart
+		<< ", LineEnd=" << value.LineEnd << "]";
+}
+
+raw_ostream &operator<<(raw_ostream& os, const PresumedLoc& value) {
+	return os << "PresumedLoc[Filename=" << value.getFilename()
+		<< ", FileID=" << value.getFileID().getHashValue()
+		<< ", Line=" << value.getLine()
+		<< ", Column=" << value.getColumn()
+		// << ", IncludeLoc=" << value.getIncludeLoc().printToString(SM)
+		<< "]";
+}
 
 CoverageSourceInfo *
 CoverageMappingModuleGen::setUpCoverageCallbacks(Preprocessor &PP) {
@@ -213,6 +233,54 @@ public:
   void resetMCDCParams() { MCDCParams = mcdc::Parameters(); }
 };
 
+#if TRY_PRESUMED_LOCATION
+/// Spelling locations for the start and end of a source region.
+struct SpellingRegion {
+  /// The line where the region starts.
+  unsigned LineStart;
+
+  /// The column where the region starts.
+  unsigned ColumnStart;
+
+  /// The line where the region ends.
+  unsigned LineEnd;
+
+  /// The column where the region ends.
+  unsigned ColumnEnd;
+
+  SpellingRegion(SourceManager &SM, SourceLocation LocStart,
+                 SourceLocation LocEnd) {
+    // Use expansion locations instead of spelling locations
+    // to get the logical source location from #line directives
+    LineStart = SM.getPresumedLineNumber(LocStart);
+    ColumnStart = SM.getPresumedColumnNumber(LocStart);
+    LineEnd = SM.getPresumedLineNumber(LocEnd);
+    ColumnEnd = SM.getPresumedColumnNumber(LocEnd);
+
+#if 0
+    llvm::errs() << "SpellingRegion created:\n";
+    llvm::errs() << "  LocStart: " << LocStart.printToString(SM) << "\n";
+    llvm::errs() << "  LocEnd: " << LocEnd.printToString(SM) << "\n";
+    llvm::errs() << "  LineStart (expansion): " << LineStart << "\n";
+    llvm::errs() << "  LineEnd (expansion): " << LineEnd << "\n";
+    llvm::errs() << "  Default line would be: " << SM.getLineNumber(LocStart) << "\n";
+    llvm::errs() << "  Expanded line would be: " << SM.getExpansionLineNumber(LocStart) << "\n";
+    llvm::errs() << "  Presumed line would be: " << SM.getPresumedLineNumber(LocStart) << "\n";
+    llvm::errs() << "  Spelling line would be: " << SM.getSpellingLineNumber(LocStart) << "\n";
+#endif
+  }
+
+  SpellingRegion(SourceManager &SM, SourceMappingRegion &R)
+      : SpellingRegion(SM, R.getBeginLoc(), R.getEndLoc()) {}
+
+  /// Check if the start and end locations appear in source order, i.e
+  /// top->bottom, left->right.
+  bool isInSourceOrder() const {
+    return (LineStart < LineEnd) ||
+           (LineStart == LineEnd && ColumnStart <= ColumnEnd);
+  }
+};
+#else
 /// Spelling locations for the start and end of a source region.
 struct SpellingRegion {
   /// The line where the region starts.
@@ -245,6 +313,7 @@ struct SpellingRegion {
            (LineStart == LineEnd && ColumnStart <= ColumnEnd);
   }
 };
+#endif
 
 /// Provides the common functionality for the different
 /// coverage mapping region builders.
@@ -258,6 +327,10 @@ private:
   /// Map of clang's FileIDs to IDs used for coverage mapping.
   llvm::SmallDenseMap<FileID, std::pair<unsigned, SourceLocation>, 8>
       FileIDMapping;
+#if TRY_PRESUMED_LOCATION
+  /// Map of presumed filenames to coverage file IDs
+  llvm::StringMap<unsigned> PresumedFileMapping;
+#endif
 
 public:
   /// The coverage mapping regions for this function
@@ -348,6 +421,53 @@ public:
     return true;
   }
 
+#if TRY_PRESUMED_LOCATION && 0
+  /// Get the start of \c S ignoring macro arguments and builtin macros.
+  SourceLocation getStart(const Stmt *S) {
+    SourceLocation Loc = S->getBeginLoc();
+    SourceLocation OrigLoc = Loc;
+
+    while (SM.isMacroArgExpansion(Loc) || isInBuiltin(Loc)) {
+      llvm::errs() << "getStart: Expanding location from "
+                   << Loc.printToString(SM) << " to ";
+      Loc = SM.getImmediateExpansionRange(Loc).getBegin();
+      llvm::errs() << Loc.printToString(SM) << "\n";
+    }
+
+    if (OrigLoc != Loc) {
+      llvm::errs() << "getStart: Final location: " << Loc.printToString(SM) << "\n";
+    }
+
+    return Loc;
+  }
+
+  /// Get the end of \c S ignoring macro arguments and builtin macros.
+  SourceLocation getEnd(const Stmt *S) {
+    SourceLocation Loc = S->getEndLoc();
+    SourceLocation OrigLoc = Loc;
+
+    while (SM.isMacroArgExpansion(Loc) || isInBuiltin(Loc)) {
+      llvm::errs() << "getEnd: Expanding location from "
+                   << Loc.printToString(SM) << " to ";
+      Loc = SM.getImmediateExpansionRange(Loc).getBegin();
+      llvm::errs() << Loc.printToString(SM) << "\n";
+    }
+
+    if (OrigLoc != Loc) {
+      llvm::errs() << "getEnd: Final location before getPreciseTokenLocEnd: "
+                   << Loc.printToString(SM) << "\n";
+    }
+
+    SourceLocation Result = getPreciseTokenLocEnd(Loc);
+
+    if (Loc != Result) {
+      llvm::errs() << "getEnd: After getPreciseTokenLocEnd: "
+                   << Result.printToString(SM) << "\n";
+    }
+
+    return Result;
+  }
+#else
   /// Get the start of \c S ignoring macro arguments and builtin macros.
   SourceLocation getStart(const Stmt *S) {
     SourceLocation Loc = S->getBeginLoc();
@@ -363,6 +483,7 @@ public:
       Loc = SM.getImmediateExpansionRange(Loc).getBegin();
     return getPreciseTokenLocEnd(Loc);
   }
+#endif
 
   /// Find the set of files we have regions for and assign IDs
   ///
@@ -371,11 +492,39 @@ public:
   /// expansion regions.
   void gatherFileIDs(SmallVectorImpl<unsigned> &Mapping) {
     FileIDMapping.clear();
+#if TRY_PRESUMED_LOCATION
+    PresumedFileMapping.clear();
+#endif
 
     llvm::SmallSet<FileID, 8> Visited;
     SmallVector<std::pair<SourceLocation, unsigned>, 8> FileLocs;
+
+#if TRY_PRESUMED_LOCATION
+      // NEW: Track visited by presumed filename, not just FileID
+      // llvm::StringSet<> VisitedPresumedFiles;
+#endif
+
+#if 0
+      // ADD THIS: Collect ALL FileIDs from regions first
+      llvm::SmallSet<FileID, 8> AllFileIDs;
+      for (auto &Region : SourceRegions) {
+          SourceLocation Loc = Region.getBeginLoc();
+          AllFileIDs.insert(SM.getFileID(Loc));
+          AllFileIDs.insert(SM.getFileID(Region.getEndLoc()));
+      }
+
+      llvm::errs() << "gatherFileIDs: Found " << AllFileIDs.size() << " unique FileIDs in regions\n";
+      for (FileID FID : AllFileIDs) {
+          SourceLocation Loc = SM.getLocForStartOfFile(FID);
+          llvm::errs() << "  FileID " << FID.getHashValue()
+                       << ": " << SM.getFilename(Loc) << "\n";
+      }
+#endif
+
     for (auto &Region : SourceRegions) {
       SourceLocation Loc = Region.getBeginLoc();
+      llvm::errs() << "#gatherFileIDs: SourceRegion Loc=" << Loc.printToString(SM)
+        << "\n";
 
       // Replace Region with its definition if it is in <scratch space>.
       auto NonScratchExpansionLoc = getNonScratchExpansionLoc(Loc);
@@ -398,8 +547,25 @@ public:
       }
 
       FileID File = SM.getFileID(Loc);
+#if TRY_PRESUMED_LOCATION
+      // Check if we've already processed this PRESUMED file
+      PresumedLoc PLoc = SM.getPresumedLoc(Loc);
+      StringRef PresumedFilename = PLoc.getFilename();
+      auto PresumedEntry = SM.getFileManager().getOptionalFileRef(PresumedFilename);
+      if (PresumedEntry) {
+          FileID PresumedFile = SM.getOrCreateFileID(*PresumedEntry, SrcMgr::C_User);
+          if (!Visited.insert(PresumedFile).second)
+              continue;
+      } else {
+          llvm::errs() << "gatherFileIDs: MISSING! PresumedFilename=" << PresumedFilename
+             << " Fallback to Loc=" << Loc.printToString(SM) << "\n";
+          if (!Visited.insert(File).second)
+              continue;
+      }
+#else
       if (!Visited.insert(File).second)
         continue;
+#endif
 
       assert(SystemHeadersCoverage ||
              !SM.isInSystemHeader(SM.getSpellingLoc(Loc)));
@@ -408,19 +574,87 @@ public:
       for (SourceLocation Parent = getIncludeOrExpansionLoc(Loc);
            Parent.isValid(); Parent = getIncludeOrExpansionLoc(Parent))
         ++Depth;
+      llvm::errs() << "gatherFileIDs: FileLocs ADD Loc=" << Loc.printToString(SM)
+        << " getFilename=" << SM.getFilename(Loc)
+        << " Depth=" << Depth
+        << "\n";
       FileLocs.push_back(std::make_pair(Loc, Depth));
     }
     llvm::stable_sort(FileLocs, llvm::less_second());
+
+#if TRY_PRESUMED_LOCATION
+    // Track which presumed files we've already added
+    llvm::StringSet<> AddedPresumedFiles;
+#endif
 
     for (const auto &FL : FileLocs) {
       SourceLocation Loc = FL.first;
       FileID SpellingFile = SM.getDecomposedSpellingLoc(Loc).first;
       auto Entry = SM.getFileEntryRefForID(SpellingFile);
+      llvm::errs() << "gatherFileIDs:  Loc=" << Loc.printToString(SM)
+        << " FileId=" << SM.getFileID(Loc).getHashValue()
+        << " getFilename=" << SM.getFilename(Loc)
+        << "\n";
       if (!Entry)
         continue;
+      llvm::errs() << "gatherFileIDs: Entry->getName()=" << Entry->getName()
+        << "\n";
 
+#if TRY_PRESUMED_LOCATION
+      PresumedLoc PLoc = SM.getPresumedLoc(Loc);
+      llvm::errs() << "gatherFileIDs:  PLoc=" << PLoc
+                     << ", IncludeLoc=" << PLoc.getIncludeLoc().printToString(SM)
+                     << "\n";
+      StringRef PresumedFilename = PLoc.getFilename();
+      llvm::errs() << "gatherFileIDs: PresumedFilename=" << PresumedFilename << "\n";
+
+      if(!AddedPresumedFiles.contains(PresumedFilename)) {
+          // This is a presumed location - add the presumed file instead of the spelling file
+          auto PresumedEntry = SM.getFileManager().getOptionalFileRef(PresumedFilename);
+          if (!PresumedEntry) {
+#if 1
+              llvm::errs() << "FATAL: Could not find presumed file: " << PresumedFilename
+                           << " referenced at " << Loc.printToString(SM) << "\n";
+              FileIDMapping[SM.getFileID(Loc)] = std::make_pair(Mapping.size(), Loc);
+              Mapping.push_back(CVM.getFileID(*Entry));
+              continue;
+#else
+              CVM.getCodeGenModule().getDiags().Report(
+                      Loc, diag::err_fe_error_opening)
+                      << PresumedFilename << "presumed file from #line directive not found";
+              llvm::errs() << "FATAL: Could not find presumed file: " << PresumedFilename
+                           << " referenced at " << Loc.printToString(SM) << "\n";
+              llvm::report_fatal_error("Presumed source file not found for coverage mapping");
+#endif
+          }
+
+          llvm::errs() << "gatherFileIDs: PresumedEntry->getName()=" << PresumedEntry->getName() << "\n";
+
+          // Add the presumed file to the mapping
+          unsigned CovFileID = Mapping.size();
+          PresumedFileMapping[PresumedFilename] = CovFileID;
+          Mapping.push_back(CVM.getFileID(*PresumedEntry));
+          AddedPresumedFiles.insert(PresumedFilename);
+          llvm::errs() << "gatherFileIDs: Added PresumedFile mapping, filename=" << PresumedFilename
+                       << " -> index=" << CovFileID << "\n";
+
+          // IMPORTANT: Also add a FileIDMapping entry for the spelling file that points to the presumed file
+          // This ensures that FileLineRanges in gatherSkippedRegions() can access this index
+          FileIDMapping[SM.getFileID(Loc)] = std::make_pair(CovFileID, Loc);
+      }
+      else {
+          // Already added - map this FileID to the existing coverage ID
+          unsigned CovFileID = PresumedFileMapping[PresumedFilename];
+          FileIDMapping[SM.getFileID(Loc)] = std::make_pair(CovFileID, Loc);
+
+          llvm::errs() << "gatherFileIDs: Reusing PresumedFile mapping, filename=" << PresumedFilename
+                       << " -> CovFileID=" << CovFileID
+                       << " for FileID=" << SM.getFileID(Loc).getHashValue() << "\n";
+      }
+#else
       FileIDMapping[SM.getFileID(Loc)] = std::make_pair(Mapping.size(), Loc);
       Mapping.push_back(CVM.getFileID(*Entry));
+#endif
     }
   }
 
@@ -433,6 +667,59 @@ public:
       return Mapping->second.first;
     return std::nullopt;
   }
+
+#if TRY_PRESUMED_LOCATION
+  std::optional<unsigned> getPresumedCoverageFileID(SourceLocation Loc) {
+    PresumedLoc PLoc = SM.getPresumedLoc(Loc);
+#if 0
+    llvm::errs() << "getPresumedCoverageFileID: PLoc=" << PLoc
+       << ", IncludeLoc=" << PLoc.getIncludeLoc().printToString(SM)
+       << "\n";
+#endif
+
+    // Look up by presumed filename
+    StringRef PresumedFilename = PLoc.getFilename();
+    auto It = PresumedFileMapping.find(PresumedFilename);
+    if (It != PresumedFileMapping.end()) {
+        llvm::errs() << "getPresumedCoverageFileID: Found via PresumedFilename=" << PresumedFilename
+            << " PLoc=" << PLoc
+            << " Loc=" << Loc.printToString(SM)
+            << " -> " << It->second << "\n";
+        return It->second;
+    }
+
+#if 0
+    // Fall back to spelling file ID
+    FileID SpellingFile = SM.getDecomposedSpellingLoc(Loc).first;
+    auto Mapping = FileIDMapping.find(SpellingFile);
+    if (Mapping != FileIDMapping.end()) {
+        llvm::errs() << "getPresumedCoverageFileID: Found via getDecomposedSpellingLoc: SpellingFile="
+                     << SpellingFile.getHashValue() << " -> " << Mapping->second.first << "\n";
+        return Mapping->second.first;
+    }
+#endif
+
+#if 0
+    // Last resort: try the direct FileID
+    FileID DirectFile = SM.getFileID(Loc);
+    auto DirectMapping = FileIDMapping.find(DirectFile);
+    if (DirectMapping != FileIDMapping.end()) {
+        llvm::errs() << "getPresumedCoverageFileID: PLoc=" << PLoc
+                     << ", IncludeLoc=" << PLoc.getIncludeLoc().printToString(SM)
+                     << "\n";
+        llvm::errs() << "getPresumedCoverageFileID: Found via getFileID: DirectFile="
+                     << DirectFile.getHashValue() << " -> " << DirectMapping->second.first << "\n";
+        return DirectMapping->second.first;
+    }
+#endif
+
+    if (PresumedFilename.contains("test") || PLoc.isInvalid()) {
+        llvm::errs() << "getPresumedCoverageFileID: FATAL - No mapping found for "
+                     << Loc.printToString(SM) << "\n";
+    }
+    return std::nullopt;
+  }
+#endif
 
   /// This shrinks the skipped range if it spans a line that contains a
   /// non-comment token. If shrinking the skipped range would make it empty,
@@ -447,10 +734,18 @@ public:
     SpellingRegion SR{SM, LocStart, LocEnd};
     SR.ColumnStart = 1;
     if (PrevTokLoc.isValid() && SM.isWrittenInSameFile(LocStart, PrevTokLoc) &&
+#if TRY_PRESUMED_LOCATION
+        SR.LineStart == SM.getPresumedLineNumber(PrevTokLoc))
+#else
         SR.LineStart == SM.getSpellingLineNumber(PrevTokLoc))
+#endif
       SR.LineStart++;
     if (NextTokLoc.isValid() && SM.isWrittenInSameFile(LocEnd, NextTokLoc) &&
+#if TRY_PRESUMED_LOCATION
+        SR.LineEnd == SM.getPresumedLineNumber(NextTokLoc)) {
+#else
         SR.LineEnd == SM.getSpellingLineNumber(NextTokLoc)) {
+#endif
       SR.LineEnd--;
       SR.ColumnEnd++;
     }
@@ -459,51 +754,109 @@ public:
     return std::nullopt;
   }
 
+
   /// Gather all the regions that were skipped by the preprocessor
   /// using the constructs like #if or comments.
   void gatherSkippedRegions() {
     /// An array of the minimum lineStarts and the maximum lineEnds
     /// for mapping regions from the appropriate source files.
     llvm::SmallVector<std::pair<unsigned, unsigned>, 8> FileLineRanges;
+
+#if TRY_PRESUMED_LOCATION
+	// Calculate the actual size needed based on all file mappings
+	unsigned MaxFileID = 0;
+	if (!MappingRegions.empty()) {
+	    for (const auto &R : MappingRegions) {
+		    MaxFileID = std::max(MaxFileID, R.FileID);
+	    }
+	}
+
+	FileLineRanges.resize(MaxFileID + 1,
+		              std::make_pair(std::numeric_limits<unsigned>::max(), 0));
+#else
     FileLineRanges.resize(
         FileIDMapping.size(),
         std::make_pair(std::numeric_limits<unsigned>::max(), 0));
+#endif
+    llvm::errs() << "#gatherSkippedRegions: ENTERED FileIDMapping.size=" << FileIDMapping.size() << "\n";
+    llvm::errs() << "    FileLineRanges.size=" << FileLineRanges.size() << "\n";
+
     for (const auto &R : MappingRegions) {
-      FileLineRanges[R.FileID].first =
-          std::min(FileLineRanges[R.FileID].first, R.LineStart);
-      FileLineRanges[R.FileID].second =
-          std::max(FileLineRanges[R.FileID].second, R.LineEnd);
+        llvm::errs() << "#gatherSkippedRegions: FileLineRanges R=" << R << "\n";
+
+        // Add bounds check
+        if (R.FileID >= FileLineRanges.size()) {
+            llvm::errs() << "gatherSkippedRegions: WARNING - FileID " << R.FileID
+                         << " out of bounds (size=" << FileLineRanges.size() << ")\n";
+            continue;
+        }
+
+        FileLineRanges[R.FileID].first =
+                std::min(FileLineRanges[R.FileID].first, R.LineStart);
+        FileLineRanges[R.FileID].second =
+                std::max(FileLineRanges[R.FileID].second, R.LineEnd);
+        llvm::errs() << "#gatherSkippedRegions: R.FileID first=" << FileLineRanges[R.FileID].first
+                     << " second=" << FileLineRanges[R.FileID].second
+                     << "\n";
     }
 
     auto SkippedRanges = CVM.getSourceInfo().getSkippedRanges();
     for (auto &I : SkippedRanges) {
-      SourceRange Range = I.Range;
-      auto LocStart = Range.getBegin();
-      auto LocEnd = Range.getEnd();
-      assert(SM.isWrittenInSameFile(LocStart, LocEnd) &&
-             "region spans multiple files");
+        SourceRange Range = I.Range;
+        auto LocStart = Range.getBegin();
+        auto LocEnd = Range.getEnd();
+        assert(SM.isWrittenInSameFile(LocStart, LocEnd) &&
+               "region spans multiple files");
 
-      auto CovFileID = getCoverageFileID(LocStart);
-      if (!CovFileID)
-        continue;
-      std::optional<SpellingRegion> SR;
-      if (I.isComment())
-        SR = adjustSkippedRange(SM, LocStart, LocEnd, I.PrevTokLoc,
-                                I.NextTokLoc);
-      else if (I.isPPIfElse() || I.isEmptyLine())
-        SR = {SM, LocStart, LocEnd};
+#if TRY_PRESUMED_LOCATION
+        auto CovFileID = getPresumedCoverageFileID(LocStart);
+#else
+        auto CovFileID = getCoverageFileID(LocStart);
+#endif
+        if (!CovFileID)
+            continue;
 
-      if (!SR)
-        continue;
-      auto Region = CounterMappingRegion::makeSkipped(
-          *CovFileID, SR->LineStart, SR->ColumnStart, SR->LineEnd,
-          SR->ColumnEnd);
-      // Make sure that we only collect the regions that are inside
-      // the source code of this function.
-      if (Region.LineStart >= FileLineRanges[*CovFileID].first &&
-          Region.LineEnd <= FileLineRanges[*CovFileID].second)
-        MappingRegions.push_back(Region);
-    }
+#if TRY_PRESUMED_LOCATION
+        // Ensure the FileID is within bounds
+        if (*CovFileID >= FileLineRanges.size()) {
+            llvm::errs() << "gatherSkippedRegions: WARNING - CovFileID " << *CovFileID
+                         << " out of bounds (size=" << FileLineRanges.size() << ")\n";
+            continue;
+        }
+#endif
+
+        std::optional<SpellingRegion> SR;
+        if (I.isComment())
+            SR = adjustSkippedRange(SM, LocStart, LocEnd, I.PrevTokLoc,
+                                    I.NextTokLoc);
+        else if (I.isPPIfElse() || I.isEmptyLine())
+            SR = {SM, LocStart, LocEnd};
+
+        if (!SR)
+            continue;
+
+#if TRY_PRESUMED_LOCATION && 0
+        // Skip degenerate regions (same start and end)
+        if (SR->LineStart == SR->LineEnd && SR->ColumnStart == SR->ColumnEnd) {
+            llvm::errs() << "gatherSkippedRegions: SKIPPING degenerate region at line "
+                         << SR->LineStart << "\n";
+            continue;
+        }
+#endif
+
+        auto Region = CounterMappingRegion::makeSkipped(
+                *CovFileID, SR->LineStart, SR->ColumnStart, SR->LineEnd,
+                SR->ColumnEnd);
+        // Make sure that we only collect the regions that are inside
+        // the source code of this function.
+        if (Region.LineStart >= FileLineRanges[*CovFileID].first &&
+            Region.LineEnd <= FileLineRanges[*CovFileID].second) {
+            llvm::errs() << "gatherSkippedRegions: ADDED Region=" << Region << "\n";
+            MappingRegions.push_back(Region);
+        } else {
+            llvm::errs() << "gatherSkippedRegions: IGNORED Region=" << Region << "\n";
+        }
+     }
   }
 
   /// Generate the coverage counter mapping regions from collected
@@ -511,6 +864,11 @@ public:
   void emitSourceRegions(const SourceRegionFilter &Filter) {
     for (const auto &Region : SourceRegions) {
       assert(Region.hasEndLoc() && "incomplete region");
+
+      StringRef Filename = SM.getFilename(Region.getBeginLoc());
+	  llvm::errs() << "Writing coverage region for file: " << Filename << "\n";
+	  llvm::errs() << "  Region: " << Region.getBeginLoc().printToString(SM)
+					 << " -> " << Region.getEndLoc().printToString(SM) << "\n";
 
       SourceLocation LocStart = Region.getBeginLoc();
       assert(SM.getFileID(LocStart).isValid() && "region in invalid file");
@@ -524,13 +882,38 @@ public:
         continue;
       }
 
+#if TRY_PRESUMED_LOCATION
+      auto CovFileID = getPresumedCoverageFileID(LocStart);
+#else
       auto CovFileID = getCoverageFileID(LocStart);
+#endif
       // Ignore regions that don't have a file, such as builtin macros.
       if (!CovFileID) {
         assert(!Region.isMCDCBranch() && !Region.isMCDCDecision() &&
                "Don't suppress the condition in non-file regions");
+        llvm::errs() << "  *** NO COVERAGE FILE ID FOUND! ***\n";
+        llvm::errs() << "  This region will be DROPPED!\n";
         continue;
       }
+
+#if TRY_PRESUMED_LOCATION || 1
+	  // Add this logging:
+		llvm::errs() << "CovFileID: " << *CovFileID << "\n";
+		llvm::errs() << "  Location: " << LocStart.printToString(SM) << "\n";
+
+		// Get the filename for this FileID
+		FileID FID = SM.getFileID(LocStart);
+		llvm::errs() << "  FileID from location: " << FID.getHashValue() << "\n";
+
+		// Get presumed location to see what file it should be
+		PresumedLoc PLoc = SM.getPresumedLoc(LocStart);
+		llvm::errs() << "  Presumed filename: " << PLoc.getFilename() << "\n";
+		llvm::errs() << "  Presumed line: " << PLoc.getLine() << "\n";
+
+		// Check what filename the FileID maps to
+		StringRef ActualFilename = SM.getFilename(LocStart);
+		llvm::errs() << "  Actual filename from SM: " << ActualFilename << "\n";
+#endif
 
       SourceLocation LocEnd = Region.getEndLoc();
       assert(SM.isWrittenInSameFile(LocStart, LocEnd) &&
@@ -549,6 +932,19 @@ public:
       // Find the spelling locations for the mapping region.
       SpellingRegion SR{SM, LocStart, LocEnd};
       assert(SR.isInSourceOrder() && "region start and end out of order");
+      llvm::errs() << "SpellingRegion: SR.LineStart=" << SR.LineStart
+        << " SR.LineEnd=" << SR.LineEnd
+        << "\n";
+
+#if 1
+        // Add this debug output:
+        if (!Region.isGap() && !Region.isSkipped() && !Region.isBranch()) {
+            llvm::errs() << "#Function region: Counter=" << Region.getCounter().getCounterID()
+                         << " File=" << *CovFileID
+                         << " Line=" << SR.LineStart << "-" << SR.LineEnd
+                         << " Location=" << LocStart.printToString(SM) << "\n";
+        }
+#endif
 
       if (Region.isGap()) {
         MappingRegions.push_back(CounterMappingRegion::makeGapRegion(
@@ -572,6 +968,7 @@ public:
             Region.getCounter(), *CovFileID, SR.LineStart, SR.ColumnStart,
             SR.LineEnd, SR.ColumnEnd));
       }
+      llvm::errs() << "emitSourceRegions: added region=" << MappingRegions.back() << "\n";
     }
   }
 
@@ -581,13 +978,21 @@ public:
     for (const auto &FM : FileIDMapping) {
       SourceLocation ExpandedLoc = FM.second.second;
       SourceLocation ParentLoc = getIncludeOrExpansionLoc(ExpandedLoc, false);
+      llvm::errs() << "emitExpansionRegions: ExpandedLoc=" << ExpandedLoc.printToString(SM)
+         << " ParentLoc=" << ExpandedLoc.printToString(SM)
+         << "\n";
       if (ParentLoc.isInvalid())
         continue;
 
       auto ParentFileID = getCoverageFileID(ParentLoc);
+        llvm::errs() << "emitExpansionRegions: ParentFileID=" << ParentFileID << "\n";
       if (!ParentFileID)
         continue;
+#if TRY_PRESUMED_LOCATION
+	  auto ExpandedFileID = getPresumedCoverageFileID(ExpandedLoc);
+#else
       auto ExpandedFileID = getCoverageFileID(ExpandedLoc);
+#endif
       assert(ExpandedFileID && "expansion in uncovered file");
 
       SourceLocation LocEnd = getPreciseTokenLocEnd(ParentLoc);
@@ -600,6 +1005,7 @@ public:
       MappingRegions.push_back(CounterMappingRegion::makeExpansion(
           *ParentFileID, *ExpandedFileID, SR.LineStart, SR.ColumnStart,
           SR.LineEnd, SR.ColumnEnd));
+      llvm::errs() << "emitExpansionRegions: ADDED Region=" << MappingRegions.back() << "\n";
     }
     return Filter;
   }
@@ -648,6 +1054,8 @@ struct EmptyCoverageMappingBuilder : public CoverageMappingBuilder {
     if (MappingRegions.empty())
       return;
 
+    llvm::errs() << "### EmptyCoverageMappingBuilder: FileIDMapping.size=" << FileIDMapping.size() << "\n";
+    llvm::errs() << "   MappingRegions.size=" << MappingRegions.size() << "\n";
     CoverageMappingWriter Writer(FileIDMapping, {}, MappingRegions);
     Writer.write(OS);
   }
@@ -1466,6 +1874,7 @@ struct CounterCoverageMappingBuilder
 
   /// Write the mapping data to the output stream
   void write(llvm::raw_ostream &OS) {
+    llvm::errs() << "\n### CounterCoverageMappingBuilder: BEGIN\n";
     llvm::SmallVector<unsigned, 8> VirtualFileMapping;
     gatherFileIDs(VirtualFileMapping);
     SourceRegionFilter Filter = emitExpansionRegions();
@@ -1475,9 +1884,18 @@ struct CounterCoverageMappingBuilder
     if (MappingRegions.empty())
       return;
 
+    llvm::errs() << "### CounterCoverageMappingBuilder: FileIDMapping.size=" << VirtualFileMapping.size() << "\n";
+    for (auto& M : VirtualFileMapping) {
+      llvm::errs() << "   M=" << M << "\n";
+    }
+    llvm::errs() << "   MappingRegions.size=" << MappingRegions.size() << "\n";
+    for (auto& R : MappingRegions) {
+        llvm::errs() << "   R=" << R << "\n";
+    }
     CoverageMappingWriter Writer(VirtualFileMapping, Builder.getExpressions(),
                                  MappingRegions);
     Writer.write(OS);
+    llvm::errs() << "### CounterCoverageMappingBuilder: END\n\n";
   }
 
   void VisitStmt(const Stmt *S) {
@@ -2642,11 +3060,13 @@ unsigned CoverageMappingModuleGen::getFileID(FileEntryRef File) {
 
 void CoverageMappingGen::emitCounterMapping(const Decl *D,
                                             llvm::raw_ostream &OS) {
+  llvm::errs() << "\n### CoverageMappingGen::emitCounterMapping: BEGIN\n";
   assert(CounterMap && MCDCState);
   CounterCoverageMappingBuilder Walker(CVM, *CounterMap, *MCDCState, SM,
                                        LangOpts);
   Walker.VisitDecl(D);
   Walker.write(OS);
+  llvm::errs() << "\n### CoverageMappingGen::emitCounterMapping: DONE!\n";
 }
 
 void CoverageMappingGen::emitEmptyMapping(const Decl *D,
